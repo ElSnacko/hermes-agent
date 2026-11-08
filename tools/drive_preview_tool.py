@@ -21,8 +21,10 @@ ACTIONS = ("elements", "click", "hover", "type", "scroll", "press", "strobe", "b
 SCROLL_TO = ("top", "bottom")
 
 # One setfiles embeds the whole file in a single act payload (the renderer
-# rebuilds it in-page); the bridge message has to stay bounded: 10 MiB.
-MAX_FILE_BYTES = 10 * 1024 * 1024
+# rebuilds it in-page). The act request frame rides a bounded ~4 MiB per-peer
+# mailbox and base64 inflates the bytes by 4/3, leaving ~3 MiB before frame
+# overhead — 2 MiB is the safe ceiling.
+MAX_FILE_BYTES = 2 * 1024 * 1024
 FILE_MIME_BY_SUFFIX = {
     ".pdf": "application/pdf",
     ".doc": "application/msword",
@@ -33,9 +35,11 @@ FILE_MIME_BY_SUFFIX = {
 }
 
 # Verbs that need something to act on — a ref from the last inventory, or a
-# raw CSS selector (`setfiles` is selector-only: a ref can't name a file
-# input). `scroll` is deliberately absent: bare, it scrolls the page.
-NEEDS_TARGET = ("click", "hover", "type", "press", "setfiles")
+# raw CSS selector. `scroll` is deliberately absent: bare, it scrolls the page.
+# So is `setfiles`: it is selector-only (a ref can't name a file input), and its
+# own branch refuses a missing selector with a message that says so instead of
+# pointing the caller at a ref it cannot use.
+NEEDS_TARGET = ("click", "hover", "type", "press")
 
 
 def _setfiles_fields(selector, file, mime, verify_selector):
@@ -53,15 +57,21 @@ def _setfiles_fields(selector, file, mime, verify_selector):
         return None, tool_error("setfiles needs file: the local path of the file to attach.")
     if not os.path.isfile(file):
         return None, tool_error(f"setfiles file does not exist or is not a regular file: {file}")
-    size = os.path.getsize(file)
-    if size > MAX_FILE_BYTES:
-        return None, tool_error(
-            f"setfiles file is {size} bytes; the limit is 10 MiB ({MAX_FILE_BYTES} bytes): {file}")
+    # getsize and read inside one guard: the file can change shape between the
+    # two, and an OSError from either (vanished file, permissions) is a tool
+    # error naming the path, never a traceback out of the tool.
     try:
+        size = os.path.getsize(file)
+        if size == 0:
+            return None, tool_error(f"setfiles cannot attach {file}: the file is empty.")
+        if size > MAX_FILE_BYTES:
+            return None, tool_error(
+                f"setfiles file is {size} bytes; the limit is 2 MiB "
+                f"(the preview bridge caps request payloads): {file}")
         with open(file, "rb") as fh:
             file_b64 = base64.b64encode(fh.read()).decode("ascii")
     except OSError as exc:
-        return None, tool_error(f"setfiles could not read {file}: {exc}")
+        return None, tool_error(f"setfiles cannot read {file}: {exc}")
     return (
         ("action", "setfiles"), ("selector", selector), ("file_name", os.path.basename(file)),
         ("file_b64", file_b64),
@@ -192,9 +202,13 @@ ACT_PREVIEW_SCHEMA = {
                 "type": "boolean",
                 "description": "elements: full re-read instead of a delta. Rarely needed.",
             },
-            "file": {"type": "string", "description": "setfiles: local path of the file to attach (max 10 MiB)."},
+            "file": {"type": "string", "description": "setfiles: local path of the file to attach (max 2 MiB)."},
             "mime": {"type": "string", "description": "setfiles: MIME override; default is guessed from the suffix."},
-            "verify_selector": {"type": "string", "description": "setfiles: selector to confirm before attaching."},
+            "verify_selector": {
+                "type": "string",
+                "description": "setfiles: selector to confirm after the attach, "
+                               "whose rendered text should name the file.",
+            },
         },
         "required": ["action"],
     },

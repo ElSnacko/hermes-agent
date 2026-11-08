@@ -522,7 +522,10 @@ async function setFiles(run: PreviewScriptRunner, action: PreviewActAction): Pro
     return { error: 'setfiles needs a CSS selector for the file input.', success: false }
   }
 
-  if (!action.fileName || !action.fileB64) {
+  // A type check, not truthiness: fileB64 '' is representable on the wire (it
+  // encodes an empty file) — the backend refuses empty files itself, with an
+  // error that names them.
+  if (!action.fileName || typeof action.fileB64 !== 'string') {
     return { error: 'setfiles needs the file name and base64 contents of the file to attach.', success: false }
   }
 

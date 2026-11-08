@@ -845,4 +845,53 @@ describe('actOnActivePreview (drive_preview tool)', () => {
     expect(injected).toContain('".upload-status"')
     expect(result).toMatchObject({ success: true, verifyMatched: true })
   })
+
+  it('fails with the page error when the attach script answers ok:false', async () => {
+    withRunner(async () => JSON.stringify({ error: 'target is not a file input', ok: false }))
+
+    const result = await actOnActivePreview({
+      fileB64: 'aGVsbG8=',
+      fileName: 'cv.pdf',
+      kind: 'setfiles',
+      selector: '#cv'
+    })
+
+    expect(result).toMatchObject({ error: 'target is not a file input', success: false })
+  })
+
+  // The events were dispatched before the silence — a page that stops answering
+  // right after the attach navigated or opened a dialog, it did not fail.
+  it('treats silence after the attach as a navigation, not a failure', async () => {
+    withRunner(async () => undefined)
+
+    const result = await actOnActivePreview({
+      fileB64: 'aGVsbG8=',
+      fileName: 'cv.pdf',
+      kind: 'setfiles',
+      selector: '#cv'
+    })
+
+    expect(result).toMatchObject({
+      acted: 'setfiles',
+      note: expect.stringContaining('probably navigating'),
+      success: true
+    })
+  })
+
+  it('succeeds with a nudge to re-check when the page never names the file', async () => {
+    withRunner(async () =>
+      JSON.stringify({ count: 1, name: 'cv.pdf', ok: true, verifyMatched: false, visibleTextHasName: false })
+    )
+
+    const result = await actOnActivePreview({
+      fileB64: 'aGVsbG8=',
+      fileName: 'cv.pdf',
+      kind: 'setfiles',
+      selector: '#cv'
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.note).toContain('names the file yet')
+    expect(result).toMatchObject({ count: 1, name: 'cv.pdf', verifyMatched: false, visibleTextHasName: false })
+  })
 })

@@ -164,15 +164,73 @@ def test_setfiles_missing_file_names_the_path(tmp_path):
     assert calls == []
 
 
-def test_setfiles_rejects_files_over_10_mib(tmp_path, monkeypatch):
+def test_setfiles_rejects_an_empty_file(tmp_path):
+    """A zero-byte file base64-encodes to "", which the renderer used to
+    reject with a message blaming the name — refuse it here, at the source."""
+    empty = tmp_path / "empty.pdf"
+    empty.write_bytes(b"")
+    calls = []
+    result = json.loads(ap.drive_preview_tool(
+        action="setfiles", selector="input[type=file]", file=str(empty),
+        callback=lambda p: calls.append(p) or "{}"))
+    assert "the file is empty" in result["error"]
+    assert calls == []
+
+
+def test_setfiles_rejects_a_directory_as_the_file(tmp_path):
+    """isfile() is the guard before any read: getsize on a directory raises
+    on some platforms, so it must be refused without touching it."""
+    calls = []
+    result = json.loads(ap.drive_preview_tool(
+        action="setfiles", selector="input[type=file]", file=str(tmp_path),
+        callback=lambda p: calls.append(p) or "{}"))
+    assert "not a regular file" in result["error"]
+    assert calls == []
+
+
+def test_setfiles_reports_an_unreadable_file(tmp_path, monkeypatch):
+    """An OSError out of the size check or the read is a tool error naming the
+    path, never a traceback out of the tool."""
+    locked = tmp_path / "locked.pdf"
+    locked.write_bytes(b"%PDF-1.4")
+
+    def deny(_path, _mode="rb"):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(ap, "open", deny, raising=False)
+    result = json.loads(ap.drive_preview_tool(
+        action="setfiles", selector="input[type=file]", file=str(locked), callback=lambda _p: "{}"))
+    assert "cannot read" in result["error"]
+    assert str(locked) in result["error"]
+    assert "Permission denied" in result["error"]
+
+
+def test_setfiles_accepts_a_file_exactly_at_the_cap(tmp_path):
+    """The cap itself is fine — only past it is refused. A truncate-extended
+    sparse file stands in, so 2 MiB costs nothing on disk."""
+    at_cap = tmp_path / "at-cap.pdf"
+    at_cap.write_bytes(b"%PDF-1.4")
+    with open(at_cap, "rb+") as fh:
+        fh.truncate(ap.MAX_FILE_BYTES)
+    seen = {}
+    ap.drive_preview_tool(
+        action="setfiles", selector="input[type=file]", file=str(at_cap),
+        callback=lambda p: seen.update(p) or json.dumps({"success": True}))
+
+    assert seen["file_name"] == "at-cap.pdf"
+    assert seen["file_b64"] == base64.b64encode(at_cap.read_bytes()).decode("ascii")
+
+
+def test_setfiles_rejects_files_over_2_mib(tmp_path, monkeypatch):
     """A tiny real file stands in for a huge one; only the reported size is
-    patched, so the test needs neither 10 MiB on disk nor a sparse file."""
+    patched, so the test needs neither 2 MiB on disk nor a sparse file."""
     chunky = tmp_path / "chunky.pdf"
     chunky.write_bytes(b"%PDF-1.4")
     monkeypatch.setattr(ap.os.path, "getsize", lambda _p: ap.MAX_FILE_BYTES + 1)
     result = json.loads(ap.drive_preview_tool(
         action="setfiles", selector="input[type=file]", file=str(chunky), callback=lambda _p: "{}"))
-    assert "10 MiB" in result["error"]
+    assert "2 MiB" in result["error"]
+    assert "preview bridge caps request payloads" in result["error"]
 
 
 def test_setfiles_rejects_refs(tmp_path):
@@ -182,6 +240,15 @@ def test_setfiles_rejects_refs(tmp_path):
     result = json.loads(ap.drive_preview_tool(
         action="setfiles", ref="inp-upload", file=str(pdf), callback=lambda _p: "{}"))
     assert "refs are not supported" in result["error"]
+
+
+def test_setfiles_with_no_target_at_all_names_the_selector_not_a_ref():
+    """Ref and selector both missing: the setfiles branch answers with its own
+    message — the generic needs-a-ref wording points at a ref setfiles
+    cannot use."""
+    result = json.loads(ap.drive_preview_tool(action="setfiles", callback=lambda _p: "{}"))
+    assert "setfiles needs a CSS selector" in result["error"]
+    assert "needs a ref" not in result["error"]
 
 
 def test_setfiles_unknown_suffix_defaults_to_octet_stream(tmp_path):

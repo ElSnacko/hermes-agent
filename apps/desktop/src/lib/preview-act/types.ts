@@ -93,7 +93,9 @@ export interface PreviewActAction {
    *  decodes the bytes and rebuilds a real File on the page's own
    *  <input type=file> (see buildSetFilesScript). */
   fileName?: string
-  /** setfiles: the file's bytes, base64-encoded. */
+  /** setfiles: the file's bytes, base64-encoded. The empty string encodes an
+   *  empty file and is a valid value of this field — the backend, not the
+   *  renderer, refuses empty files. */
   fileB64?: string
   /** setfiles: MIME type for the reconstructed File. */
   fileMime?: string
