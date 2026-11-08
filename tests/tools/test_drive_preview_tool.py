@@ -1,5 +1,6 @@
 """Tests for the GUI-surface ``drive_preview`` tool."""
 
+import base64
 import json
 
 from tools import drive_preview_tool as ap
@@ -119,3 +120,87 @@ def test_empty_answer_distinguishes_no_tab_from_a_stale_app():
 
     assert "no preview tab is open" in result["error"]
     assert "older than this backend" in result["error"]
+
+
+def test_setfiles_packs_the_file_into_the_payload(tmp_path):
+    """setfiles embeds the bytes itself — the page never fetches anything, so
+    the payload carries exactly the setfiles fields even when arguments meant
+    for other verbs are set."""
+    data = b"%PDF-1.4 minimal"
+    pdf = tmp_path / "report.pdf"
+    pdf.write_bytes(data)
+    seen = {}
+    ap.drive_preview_tool(
+        action="setfiles",
+        selector="input[type=file]",
+        file=str(pdf),
+        text="junk another verb might set",
+        submit=True,
+        callback=lambda p: seen.update(p) or json.dumps({"success": True}),
+    )
+
+    assert seen == {
+        "action": "setfiles",
+        "selector": "input[type=file]",
+        "file_name": "report.pdf",
+        "file_b64": base64.b64encode(data).decode("ascii"),
+        "file_mime": "application/pdf",
+    }
+
+
+def test_setfiles_needs_a_file_path():
+    result = json.loads(ap.drive_preview_tool(
+        action="setfiles", selector="input[type=file]", callback=lambda _p: "{}"))
+    assert "needs file" in result["error"]
+
+
+def test_setfiles_missing_file_names_the_path(tmp_path):
+    missing = tmp_path / "nope.pdf"
+    calls = []
+    result = json.loads(ap.drive_preview_tool(
+        action="setfiles", selector="input[type=file]", file=str(missing),
+        callback=lambda p: calls.append(p) or "{}"))
+    assert str(missing) in result["error"]
+    assert calls == []
+
+
+def test_setfiles_rejects_files_over_10_mib(tmp_path, monkeypatch):
+    """A tiny real file stands in for a huge one; only the reported size is
+    patched, so the test needs neither 10 MiB on disk nor a sparse file."""
+    chunky = tmp_path / "chunky.pdf"
+    chunky.write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(ap.os.path, "getsize", lambda _p: ap.MAX_FILE_BYTES + 1)
+    result = json.loads(ap.drive_preview_tool(
+        action="setfiles", selector="input[type=file]", file=str(chunky), callback=lambda _p: "{}"))
+    assert "10 MiB" in result["error"]
+
+
+def test_setfiles_rejects_refs(tmp_path):
+    """A ref from the inventory can't name a file input — only a selector can."""
+    pdf = tmp_path / "cv.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    result = json.loads(ap.drive_preview_tool(
+        action="setfiles", ref="inp-upload", file=str(pdf), callback=lambda _p: "{}"))
+    assert "refs are not supported" in result["error"]
+
+
+def test_setfiles_unknown_suffix_defaults_to_octet_stream(tmp_path):
+    blob = tmp_path / "export.dat"
+    blob.write_bytes(b"\x00\x01\x02")
+    seen = {}
+    ap.drive_preview_tool(
+        action="setfiles", selector="input[type=file]", file=str(blob),
+        callback=lambda p: seen.update(p) or json.dumps({"success": True}))
+    assert seen["file_mime"] == "application/octet-stream"
+
+
+def test_setfiles_forwards_mime_override_and_verify_selector(tmp_path):
+    pdf = tmp_path / "table.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    seen = {}
+    ap.drive_preview_tool(
+        action="setfiles", selector="input[type=file]", file=str(pdf), mime="text/csv",
+        verify_selector="#dropzone",
+        callback=lambda p: seen.update(p) or json.dumps({"success": True}))
+    assert seen["file_mime"] == "text/csv"
+    assert seen["verify_selector"] == "#dropzone"

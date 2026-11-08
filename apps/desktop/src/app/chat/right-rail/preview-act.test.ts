@@ -745,4 +745,104 @@ describe('actOnActivePreview (drive_preview tool)', () => {
       send.mock.calls.map(([event]) => event).some(event => event.type === 'keyDown' && event.keyCode === 'Escape')
     ).toBe(true)
   })
+
+  // setfiles embeds the whole file in the action, so the pane rebuilds it
+  // in-page and drops it on the file input — no pointer, no OS picker.
+  it('attaches the embedded file and answers with the name and count', async () => {
+    let injected = ''
+
+    withRunner(async code => {
+      injected = code
+
+      return JSON.stringify({ count: 1, name: 'resume.pdf', ok: true, verifyMatched: true, visibleTextHasName: true })
+    })
+
+    document.body.innerHTML = '<input type="file">'
+
+    try {
+      const result = await actOnActivePreview({
+        fileB64: 'aGVsbG8=',
+        fileName: 'resume.pdf',
+        fileMime: 'application/pdf',
+        kind: 'setfiles',
+        selector: 'input[type=file]'
+      })
+
+      // The selector and the parsed-JSON name both travel in the script body.
+      expect(injected).toContain('input[type=file]')
+      expect(injected).toContain('"resume.pdf"')
+      expect(result).toMatchObject({ count: 1, name: 'resume.pdf', success: true })
+
+      // The injected string is runnable JS against a real document: it answers
+      // with its JSON contract whether or not the host implements
+      // DataTransfer (jsdom does not, so the in-page catch answers instead).
+      const answer = JSON.parse((await new Function('return ' + injected)()) as string)
+
+      expect(typeof answer.ok).toBe('boolean')
+    } finally {
+      document.body.replaceChildren()
+    }
+  })
+
+  it('refuses setfiles without a CSS selector, without touching the page', async () => {
+    const runner = vi.fn(async () => JSON.stringify({ count: 1, ok: true }))
+
+    withRunner(runner)
+
+    const result = await actOnActivePreview({ fileB64: 'aGVsbG8=', fileName: 'resume.pdf', kind: 'setfiles' })
+
+    expect(result.success).toBe(false)
+    expect(result.error).toBe('setfiles needs a CSS selector for the file input.')
+    expect(runner).not.toHaveBeenCalled()
+  })
+
+  it('refuses setfiles without the file name or bytes', async () => {
+    const runner = vi.fn(async () => JSON.stringify({ ok: true }))
+
+    withRunner(runner)
+
+    const result = await actOnActivePreview({ kind: 'setfiles', selector: 'input[type=file]' })
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('setfiles needs the file name')
+    expect(runner).not.toHaveBeenCalled()
+  })
+
+  it('attaches through a DataTransfer and announces input and change — never a click', async () => {
+    let injected = ''
+
+    withRunner(async code => {
+      injected = code
+
+      return JSON.stringify({ count: 1, name: 'cv.pdf', ok: true })
+    })
+
+    await actOnActivePreview({ fileB64: 'aGVsbG8=', fileName: 'cv.pdf', kind: 'setfiles', selector: '#cv' })
+
+    expect(injected).toContain('new DataTransfer()')
+    expect(injected).toContain("new Event('input'")
+    expect(injected).toContain("new Event('change'")
+    expect(injected).not.toContain('.click(')
+  })
+
+  it('carries the verify selector into the page so the attach can be confirmed', async () => {
+    let injected = ''
+
+    withRunner(async code => {
+      injected = code
+
+      return JSON.stringify({ count: 1, name: 'cv.pdf', ok: true, verifyMatched: true })
+    })
+
+    const result = await actOnActivePreview({
+      fileB64: 'aGVsbG8=',
+      fileName: 'cv.pdf',
+      kind: 'setfiles',
+      selector: '#cv',
+      verifySelector: '.upload-status'
+    })
+
+    expect(injected).toContain('".upload-status"')
+    expect(result).toMatchObject({ success: true, verifyMatched: true })
+  })
 })

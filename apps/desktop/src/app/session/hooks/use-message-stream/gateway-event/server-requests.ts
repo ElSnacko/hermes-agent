@@ -693,6 +693,11 @@ const previewAct: Handler = ({ deps, isActiveSession, request, sessionId }) => {
   const action = {
     allowShortcut: p.allow_shortcut === true,
     amount: p.amount as never,
+    // setfiles embeds the whole file in the payload (file_name/file_b64 arrive
+    // snake_case off the wire, like every other drive_preview field).
+    fileB64: p.file_b64 as never,
+    fileMime: p.file_mime as never,
+    fileName: p.file_name as never,
     key: p.key as never,
     kind: (str(p.action) || '') as never,
     max: p.max as never,
@@ -700,7 +705,8 @@ const previewAct: Handler = ({ deps, isActiveSession, request, sessionId }) => {
     selector: p.selector as never,
     submit: p.submit as never,
     text: p.text as never,
-    to: p.to as PreviewActAction['to']
+    to: p.to as PreviewActAction['to'],
+    verifySelector: p.verify_selector as never
   }
 
   void (async () => {

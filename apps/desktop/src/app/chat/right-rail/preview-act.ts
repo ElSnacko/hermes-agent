@@ -462,6 +462,103 @@ function buildDirectSetScript(text: string): string {
   })()`
 }
 
+/** Attach the action's embedded file to the page's own file input.
+ *
+ *  The mechanism proven in production on Ashby: rebuild a File from the base64
+ *  bytes, hand it to the input through a DataTransfer, and dispatch input +
+ *  change so the page records the selection. NO click and NO submit — a page
+ *  whose upload needs its own Upload button keeps waiting for one.
+ *
+ *  Standalone (no engine/preamble) like the direct-set script: a file input
+ *  has no pointer work to do, so there is nothing to locate. The verify
+ *  selector is answered in the same trip so the caller can confirm the page
+ *  acknowledged the file before moving on. */
+function buildSetFilesScript(action: PreviewActAction): string {
+  const name = JSON.stringify(action.fileName || '')
+  const mime = JSON.stringify(action.fileMime || 'application/octet-stream')
+
+  return `(function(){ try {
+    var sel = ${JSON.stringify(action.selector || '')}; var input = document.querySelector(sel);
+    if (!input) { return JSON.stringify({ok:false,error:'no input matching '+sel}); }
+    if (!(input instanceof HTMLInputElement) || input.type !== 'file') { return JSON.stringify({ok:false,error:'target is not a file input'}); }
+    var bin = atob(${JSON.stringify(action.fileB64 || '')}); var u8 = new Uint8Array(bin.length);
+    for (var i=0;i<bin.length;i++) { u8[i]=bin.charCodeAt(i); }
+    var f = new File([u8], ${name}, {type: ${mime}});
+    var dt = new DataTransfer(); dt.items.add(f); input.files = dt.files;
+    input.dispatchEvent(new Event('input', {bubbles:true})); input.dispatchEvent(new Event('change', {bubbles:true}));
+    var verify = ${action.verifySelector ? JSON.stringify(action.verifySelector) : 'null'}; var matched = false;
+    if (verify) { var w = document.querySelector(verify); matched = !!w && (w.innerText || w.textContent || '').indexOf(${name}) !== -1; }
+    var visible = document.body.innerText.indexOf(${name}) !== -1;
+    return JSON.stringify({ok:true,name:${name},count:input.files.length,verifyMatched:matched,visibleTextHasName:visible});
+  } catch(e){ return JSON.stringify({ok:false,error:String(e && e.message || e)}); } })()`
+}
+
+/** The in-page setfiles answer, off the script channel — it carries its own
+ *  `ok` rather than the shared `success`, so it is read with a cast like the
+ *  field-state probe. */
+type SetFilesAnswer = {
+  count?: number
+  error?: string
+  name?: string
+  ok: boolean
+  verifyMatched?: boolean
+  visibleTextHasName?: boolean
+}
+
+/** A setfiles result, beyond the shared shape: what landed, and whether the
+ *  page said so. The tool passes these straight through to the agent. */
+type SetFilesResult = PreviewActResult & {
+  count?: number
+  name?: string
+  verifyMatched?: boolean
+  visibleTextHasName?: boolean
+}
+
+/** Validate one setfiles call, run its in-page script, and translate the
+ *  page's `ok` answer into the shared result shape (name, count, and whether
+ *  the page acknowledged the file). */
+async function setFiles(run: PreviewScriptRunner, action: PreviewActAction): Promise<SetFilesResult> {
+  if (!action.selector) {
+    return { error: 'setfiles needs a CSS selector for the file input.', success: false }
+  }
+
+  if (!action.fileName || !action.fileB64) {
+    return { error: 'setfiles needs the file name and base64 contents of the file to attach.', success: false }
+  }
+
+  const trip = await runJson(run, buildSetFilesScript(action))
+
+  if (trip.kind === 'failed') {
+    return { error: trip.error, success: false }
+  }
+
+  // The file itself settled before the silence: a page that stops answering
+  // right after the events is one that navigated or opened a dialog, not a
+  // failed attach.
+  if (trip.kind === 'silent') {
+    return { acted: 'setfiles', note: NAVIGATED, success: true }
+  }
+
+  const attached = trip.result as unknown as SetFilesAnswer
+
+  if (!attached.ok) {
+    return { error: attached.error || 'The page refused the file.', success: false }
+  }
+
+  return {
+    acted: `attached ${attached.name} to ${action.selector}`,
+    count: attached.count,
+    name: attached.name,
+    note:
+      attached.verifyMatched || attached.visibleTextHasName
+        ? undefined
+        : 'Neither the verify selector nor the page text names the file yet — the page may still be reacting. Call elements to check.',
+    success: true,
+    verifyMatched: attached.verifyMatched,
+    visibleTextHasName: attached.visibleTextHasName
+  }
+}
+
 /** Type into the focused field, and if real keystrokes could not clear a
  *  masked/hostile input (money, date, number masks that keep re-formatting),
  *  fall back to setting the value directly through the DOM. Returns null on
@@ -856,6 +953,13 @@ async function actWithChannels(
     }
 
     return trip.kind === 'answered' ? trip.result : { acted: typed.kind, note: NAVIGATED, success: true }
+  }
+
+  // A file input needs no pointer: the file is rebuilt in-page and dropped on
+  // the input through a DataTransfer, so this bypasses the whole locate → walk
+  // → real-input path (a click on a file input would open the OS picker).
+  if (typed.kind === 'setfiles') {
+    return setFiles(run, typed)
   }
 
   if (input && DRIVEN.indexOf(typed.kind) !== -1) {

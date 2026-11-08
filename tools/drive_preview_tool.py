@@ -8,25 +8,75 @@ re-sending the inventory. Round-trips through the gateway's blocking-prompt brid
 the platform-injected callback. ``desktop_ui`` toolset: desktop-sourced sessions only.
 """
 
+import base64
+import os
 from typing import Callable, Optional
 
 from tools.desktop_ui import passthrough_json
 from tools.browser_vault_preview import redact_preview_result
 from tools.registry import registry, tool_error
 
-ACTIONS = ("elements", "click", "hover", "type", "scroll", "press", "strobe", "back", "forward", "reload")
+ACTIONS = ("elements", "click", "hover", "type", "scroll", "press", "strobe", "back", "forward", "reload",
+           "setfiles")
 SCROLL_TO = ("top", "bottom")
 
+# One setfiles embeds the whole file in a single act payload (the renderer
+# rebuilds it in-page); the bridge message has to stay bounded: 10 MiB.
+MAX_FILE_BYTES = 10 * 1024 * 1024
+FILE_MIME_BY_SUFFIX = {
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": ("application/vnd.openxmlformats-officedocument."
+              "wordprocessingml.document"),
+    ".txt": "text/plain",
+    ".rtf": "application/rtf",
+}
+
 # Verbs that need something to act on — a ref from the last inventory, or a
-# raw CSS selector. `scroll` is deliberately absent: bare, it scrolls the page.
-NEEDS_TARGET = ("click", "hover", "type", "press")
+# raw CSS selector (`setfiles` is selector-only: a ref can't name a file
+# input). `scroll` is deliberately absent: bare, it scrolls the page.
+NEEDS_TARGET = ("click", "hover", "type", "press", "setfiles")
+
+
+def _setfiles_fields(selector, file, mime, verify_selector):
+    """Validate one setfiles call and package the file for the renderer.
+
+    The bytes travel inside the act payload — the page never fetches anything;
+    the renderer rebuilds a File from them and drops it on the input via
+    DataTransfer. Returns ``(fields, None)`` or ``(None, tool_error)``.
+    """
+    if not selector:
+        return None, tool_error(
+            "setfiles needs a CSS selector for the file input (refs are not supported; "
+            "run action='elements' and use the field's selector id).")
+    if not file:
+        return None, tool_error("setfiles needs file: the local path of the file to attach.")
+    if not os.path.isfile(file):
+        return None, tool_error(f"setfiles file does not exist or is not a regular file: {file}")
+    size = os.path.getsize(file)
+    if size > MAX_FILE_BYTES:
+        return None, tool_error(
+            f"setfiles file is {size} bytes; the limit is 10 MiB ({MAX_FILE_BYTES} bytes): {file}")
+    try:
+        with open(file, "rb") as fh:
+            file_b64 = base64.b64encode(fh.read()).decode("ascii")
+    except OSError as exc:
+        return None, tool_error(f"setfiles could not read {file}: {exc}")
+    return (
+        ("action", "setfiles"), ("selector", selector), ("file_name", os.path.basename(file)),
+        ("file_b64", file_b64),
+        ("file_mime", mime or FILE_MIME_BY_SUFFIX.get(
+            os.path.splitext(file)[1].lower(), "application/octet-stream")),
+        ("verify_selector", verify_selector),
+    ), None
 
 
 def drive_preview_tool(
     action: str = "", ref: Optional[str] = None, selector: Optional[str] = None, text: Optional[str] = None,
     key: Optional[str] = None, submit: Optional[bool] = None, amount: Optional[int] = None,
     to: Optional[str] = None, limit: Optional[int] = None, full: Optional[bool] = None,
-    allow_shortcut: Optional[bool] = None,
+    allow_shortcut: Optional[bool] = None, file: Optional[str] = None, mime: Optional[str] = None,
+    verify_selector: Optional[str] = None,
     callback: Optional[Callable] = None) -> str:
     """Dispatch one interaction to the desktop renderer and return its outcome."""
     if callback is None:
@@ -42,14 +92,19 @@ def drive_preview_tool(
         return tool_error("press needs a key, e.g. 'Enter' or 'Escape'.")
     if to is not None and to not in SCROLL_TO:
         return tool_error(f"to must be one of: {', '.join(SCROLL_TO)}.")
-    try:
-        fields = (
-            ("action", verb), ("ref", ref), ("selector", selector), ("text", text), ("key", key),
-            ("submit", submit), ("full", full), ("to", to), ("allow_shortcut", allow_shortcut),
-            ("amount", None if amount is None else int(amount)), ("max", None if limit is None else int(limit)),
-        )
-    except (TypeError, ValueError):
-        return tool_error("amount and max must be integers.")
+    if verb == "setfiles":
+        fields, err = _setfiles_fields(selector, file, mime, verify_selector)
+        if err:
+            return err
+    else:
+        try:
+            fields = (
+                ("action", verb), ("ref", ref), ("selector", selector), ("text", text), ("key", key),
+                ("submit", submit), ("full", full), ("to", to), ("allow_shortcut", allow_shortcut),
+                ("amount", None if amount is None else int(amount)), ("max", None if limit is None else int(limit)),
+            )
+        except (TypeError, ValueError):
+            return tool_error("amount and max must be integers.")
     try:
         raw = callback({name: val for name, val in fields if val is not None})
     except Exception as exc:
@@ -84,7 +139,9 @@ ACT_PREVIEW_SCHEMA = {
         "pointer — opens dropdowns before clicking in), type (submit=true "
         "also presses Enter), scroll, press, strobe (visual flourish only — "
         "one call runs a multi-second burst; never loop it), back/forward/"
-        "reload. Moves draw live and fade; annotate_preview leaves a lasting "
+        "reload. setfiles attaches a local file to a file input (file=PATH "
+        "plus selector; the file bytes are embedded, not fetched by the page). "
+        "Moves draw live and fade; annotate_preview leaves a lasting "
         "mark. A printable press on body/html is refused unless allow_shortcut "
         "is true. Page text only: desktop_preview action=read. Separate automated "
         "browser: browser_* tools."
@@ -135,6 +192,9 @@ ACT_PREVIEW_SCHEMA = {
                 "type": "boolean",
                 "description": "elements: full re-read instead of a delta. Rarely needed.",
             },
+            "file": {"type": "string", "description": "setfiles: local path of the file to attach (max 10 MiB)."},
+            "mime": {"type": "string", "description": "setfiles: MIME override; default is guessed from the suffix."},
+            "verify_selector": {"type": "string", "description": "setfiles: selector to confirm before attaching."},
         },
         "required": ["action"],
     },
@@ -148,6 +208,7 @@ registry.register(
     handler=lambda args, **kw: drive_preview_tool(
         action=args.get("action", ""), limit=args.get("max"), callback=kw.get("callback"),
         **{k: args.get(k) for k in (
-            "ref", "selector", "text", "key", "submit", "amount", "to", "full", "allow_shortcut")},
+            "ref", "selector", "text", "key", "submit", "amount", "to", "full", "allow_shortcut",
+            "file", "mime", "verify_selector")},
     ),
     emoji="🖱️")

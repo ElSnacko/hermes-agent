@@ -66,7 +66,19 @@ export interface PreviewActAction {
   /** `pin`/`unpin`/`hold` never reach the engine — they resolve their targets
    *  through `locate`/`elements` and then talk to the overlay — but they arrive
    *  on the same wire. */
-  kind: 'click' | 'elements' | 'hold' | 'hover' | 'locate' | 'pin' | 'press' | 'scroll' | 'strobe' | 'type' | 'unpin'
+  kind:
+    | 'click'
+    | 'elements'
+    | 'hold'
+    | 'hover'
+    | 'locate'
+    | 'pin'
+    | 'press'
+    | 'scroll'
+    | 'setfiles'
+    | 'strobe'
+    | 'type'
+    | 'unpin'
   /** locate: also give the target keyboard focus, for a key press that must not
    *  be preceded by a click (which would activate the control instead). */
   focus?: boolean
@@ -76,6 +88,18 @@ export interface PreviewActAction {
   max?: number
   ref?: string
   selector?: string
+  /** setfiles: the file travels EMBEDDED in the action — the whole payload is
+   *  one round trip, the guest page never fetches anything. The renderer
+   *  decodes the bytes and rebuilds a real File on the page's own
+   *  <input type=file> (see buildSetFilesScript). */
+  fileName?: string
+  /** setfiles: the file's bytes, base64-encoded. */
+  fileB64?: string
+  /** setfiles: MIME type for the reconstructed File. */
+  fileMime?: string
+  /** setfiles: a selector whose text should come to name the file once it is
+   *  attached, so the attach can be confirmed before the caller moves on. */
+  verifySelector?: string
   /** type: press Enter (and submit the owning form) after entering text. */
   submit?: boolean
   /** press: send a printable key even when the located target is body/html.
